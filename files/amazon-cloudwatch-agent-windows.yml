@@ -1,0 +1,144 @@
+# Copyright 2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+name: Amazon CloudWatch Agent
+description: Installs the latest version of the Amazon CloudWatch agent. This component installs only the agent. You must take additional steps to configure and use the Amazon CloudWatch agent. For more information, see the documentation at https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/install-CloudWatch-Agent-on-EC2-Instance.html.
+schemaVersion: 1.0
+phases:
+  - name: build
+    steps:
+      - name: Source
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - Write-Host "https://s3.us-east-2.amazonaws.com/amazoncloudwatch-agent-us-east-2/windows/amd64/latest/amazon-cloudwatch-agent.msi"
+      - name: Installer
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - $fileName = '{{ build.Source.outputs.stdout }}'.Split('/')[-1]
+            - Join-Path -Path $env:TEMP -ChildPath $fileName
+      - name: Download
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              $ProgressPreference = 'SilentlyContinue'
+              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+
+              Write-Host "Downloading '{{build.Source.outputs.stdout}}' to '{{build.Installer.outputs.stdout}}'"
+              $invokeWebRequest = @{
+                  UseBasicParsing = $true
+                  Uri             = '{{build.Source.outputs.stdout}}'
+                  OutFile         = '{{build.Installer.outputs.stdout}}'
+              }
+              Invoke-WebRequest @invokeWebRequest
+      - name: LogFile
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - $fileName = '{{ build.Source.outputs.stdout }}'.split('/')[-1]
+            - $fileNameWithExtension = $fileName.Replace('.msi','.log')
+            - Join-Path -Path $env:TEMP -ChildPath $fileNameWithExtension
+      - name: Install
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              # Constant exit code values
+              $exitWithReboot = 3010
+
+              # Exit codes for msiexec that require a system reboot
+              $rebootCodes = @{
+                  1641 = 'SUCCESS_REBOOT_INITIATED: The installer has started a reboot.'
+                  3010 = 'SUCCESS_REBOOT_REQUIRED: A restart is required to complete the install. This does not include installs where the ForceReboot action is run.'
+              }
+
+              # Exit codes for msiexec that are relevant for this installation
+              $knownCodes = @{
+                  0 = 'SUCCESS: Action completed successfully.'
+                  1602 = 'ERROR_INSTALL_USEREXIT: User cancel installation.'
+                  1603 = 'ERROR_INSTALL_FAILURE: Fatal error during installation.'
+                  1618 = 'ERROR_INSTALL_ALREADY_RUNNING: Another installation is already in progress. Complete that installation before proceeding with this install.'
+                  1619 = 'ERROR_INSTALL_PACKAGE_OPEN_FAILED: This installation package could not be opened. Verify that the package exists and that you can access it, or contact the application vendor to verify that this is a valid Windows Installer package.'
+                  1620 = 'ERROR_INSTALL_PACKAGE_INVALID: This installation package could not be opened. Contact the application vendor to verify that this is a valid Windows Installer package.'
+                  1622 = 'ERROR_INSTALL_LOG_FAILURE: Error opening installation log file. Verify that the specified log file location exists and is writable.'
+              }
+
+              Write-Host 'Starting installation of {{build.Installer.outputs.stdout}}...'
+              $startProcess = @{
+                  FilePath = [System.IO.Path]::Combine($env:SystemRoot, 'System32', 'msiexec.exe')
+                  ArgumentList = @(
+                      '/i'
+                      '{{ build.Installer.outputs.stdout }}'
+                      '/l*v'
+                      '{{ build.LogFile.outputs.stdout }}'
+                      '/norestart'
+                      '/qb-'
+                  )
+                  Wait = $true
+                  PassThru = $true
+              }
+              $cmd = Start-Process @startProcess
+
+              if ($cmd.ExitCode -in $rebootCodes.Keys) {
+                  Write-Host $rebootCodes[$cmd.ExitCode]
+                  [Environment]::Exit($exitWithReboot)
+              }
+              elseif ($cmd.ExitCode -in $knownCodes.Keys) {
+                  Write-Host $knownCodes[$cmd.ExitCode]
+              }
+              else {
+                  Write-Host 'UNKNOWN: Unknown exit code.'
+              }
+              [Environment]::Exit($cmd.ExitCode)
+      - name: Cleanup
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $ErrorActionPreference = 'Stop'
+              @(
+                  '{{ build.Installer.outputs.stdout }}',
+                  '{{ build.LogFile.outputs.stdout }}'
+              ) | ForEach-Object {
+                  Write-Host "Deleting '$_'"
+
+                  $getItem = @{
+                      Path        = $_
+                      ErrorAction = 'SilentlyContinue'
+                  }
+                  Get-Item @getItem | Remove-Item -Force
+              }
+
+  - name: validate
+    steps:
+      - name: AssertWindowsService
+        action: ExecutePowerShell
+        inputs:
+          commands:
+            - |
+              $name = 'AmazonCloudWatchAgent'
+              $exitWithFailure = 1
+
+              $service = Get-Service -Name $name -ErrorAction 'SilentlyContinue'
+              if ($service) {
+                  Write-Host "The $name service has been installed successfully."
+              }
+              else {
+                  Write-Host "The $name service is not installed. Failing validation."
+                  [System.Environment]::Exit($exitWithFailure)
+              }

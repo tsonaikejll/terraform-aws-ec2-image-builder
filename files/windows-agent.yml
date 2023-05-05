@@ -1,0 +1,66 @@
+# Create a custom EC2 Image Builder component that downloads and installs Visual Studio Code. The component includes a
+# validation step which will run after the install but before the image capture. Also included, is a test step which
+# runs after the image is captured (EC2 Image Builder launches a new instance from the image and runs the test phase).
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-imagebuilder-component.html
+VisualStudioCodeComponent:
+  Type: AWS::ImageBuilder::Component
+  Properties:
+    Name: VisualStudioCode
+    Version: 0.0.1
+    Description: Install Visual Studio Code
+    ChangeDescription: First version
+    Platform: Windows
+    Data: |
+      name: InstallVSCode
+      description: Downloads and Installs Visual Studio Code
+      schemaVersion: 1.0
+      phases:
+        - name: build
+          steps:
+            - name: VSCodeInstall
+              action: ExecutePowerShell
+              inputs:
+                commands:
+                  - |
+                    # Set TLS 1.2 for Invoke-RestMethod
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                    # Set the download link to Visual Studio Code (64-bit installer)
+                    $downloadUrl = "https://go.microsoft.com/fwlink/?Linkid=852157"
+                    # Set the path for our download, which will be in the temp directory
+                    $installerFile = "vscode-install.exe"
+                    $installerDownloadPath = (Join-Path $env:TEMP $installerFile)
+                    # Set Install Options
+                    # Include the context menu, file association, and add to path options (and don't run code after install:
+                    $installerArguments = '/verysilent /mergetasks=!runcode,addcontextmenufiles,addcontextmenufolders,associatewithfiles,addtopath'
+                    # Download the file
+                    Invoke-Webrequest $downloadUrl -UseBasicParsing -OutFile $installerDownloadPath
+                    # Install
+                    Start-Process $installerDownloadPath -ArgumentList $installerArguments -Wait
+                    # Cleanup
+                    Remove-Item $installerDownloadPath -Force
+        - name: validate
+          steps:
+            - name: VSCodeValidate
+              action: ExecutePowerShell
+              inputs:
+                commands:
+                  - |
+                    $installed = Test-Path (Join-Path $env:ProgramFiles "Microsoft VS Code\Code.exe")
+                    if (-not $installed)
+                    {
+                      exit 1
+                    }
+        - name: test
+          steps:
+            - name: VSCodeTest
+              action: ExecutePowerShell
+              inputs:
+                commands:
+                  - |
+                    try {
+                      code --version
+                    }
+                    catch
+                    {
+                      exit 1
+                    }
